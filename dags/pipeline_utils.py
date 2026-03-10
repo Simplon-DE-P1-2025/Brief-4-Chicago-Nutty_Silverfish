@@ -21,6 +21,8 @@ CHICAGO_API_URL = "https://data.cityofchicago.org/resource/ijzp-q8t2.json"
 API_BATCH_SIZE = 50000
 RECENT_WINDOW_DAYS = 14
 POSTGRES_CONN_ID = "chicago_crimes_db"
+# Ce fichier Soda ne contient que des placeholders. Les vraies valeurs sont
+# injectees a l'execution depuis la connexion Airflow `chicago_crimes_db`.
 SODA_CONFIG_PATH = "/usr/local/airflow/include/soda/configuration.yml"
 SODA_CHECKS_DIR = "/usr/local/airflow/include/soda/checks"
 RAW_TABLE = "chicago_crimes_raw"
@@ -98,7 +100,7 @@ TRANSFORMED_STAGING = staging_table_name(TRANSFORMED_TABLE)
 # --- Fonctions SQL ---
 
 def build_soda_environment(connection) -> dict[str, str]:
-    """Convertit une connexion Airflow en variables d'environnement pour Soda."""
+    """Expose la connexion Airflow sous forme de variables attendues par Soda."""
     return {
         "POSTGRES_HOST": connection.host or "",
         "POSTGRES_PORT": str(connection.port or 5432),
@@ -258,6 +260,8 @@ def run_soda_scan(check_file: str, scan_name: str):
     from soda.scan import Scan
 
     connection = BaseHook.get_connection(POSTGRES_CONN_ID)
+    # Soda lit `configuration.yml`, puis remplace `${POSTGRES_*}` par ces
+    # valeurs injectees depuis la connexion Airflow.
     os.environ.update(build_soda_environment(connection))
 
     scan = Scan()
