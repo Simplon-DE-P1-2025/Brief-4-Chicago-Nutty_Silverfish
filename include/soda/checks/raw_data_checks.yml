@@ -3,14 +3,27 @@ checks for chicago_crimes_raw_staging:
   - row_count > 0:
       name: La table brute contient des donnees
 
+  - row_count >= 1500:
+      name: L’API renvoie un volume suffisant
+
   - missing_count(id) = 0:
       name: Aucun ID manquant
 
   - missing_count(date) = 0:
       name: Aucune date manquante
+      
+  - max(date) <= now():
+    name: Aucune date brute dans le futur
+
 
   - missing_count(primary_type) = 0:
       name: Aucun type de crime manquant
 
   - duplicate_count(id) = 0:
       name: Les IDs sont uniques
+
+  - missing_count(latitude) < row_count:
+      name: Au moins une latitude est presente
+
+  - missing_count(longitude) < row_count:
+      name: Au moins une longitude est presente

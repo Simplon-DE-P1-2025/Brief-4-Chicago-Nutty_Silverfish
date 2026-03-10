@@ -12,5 +12,32 @@ checks for chicago_crimes_transformed_staging:
   - missing_count(latitude) = 0:
       name: Aucune latitude manquante
 
+  - missing_count(longitude) = 0:
+      name: Aucune longitude manquante
+
   - duplicate_count(id) = 0:
       name: Les IDs restent uniques apres transformation
+
+ - min(latitude) >= 41.6:
+      name: Latitude minimale dans la zone de Chicago
+
+  - max(latitude) <= 42.1:
+      name: Latitude maximale dans la zone de Chicago
+
+  - min(longitude) >= -87.95:
+      name: Longitude minimale dans la zone de Chicago
+
+  - max(longitude) <= -87.5:
+      name: Longitude maximale dans la zone de Chicago
+
+  - max(crime_date) <= now():
+      name: Aucune date de crime dans le futur
+
+  - row_count < row_count(chicago_crimes_raw_staging):
+      name: Le nettoyage réduit bien le volume
+
+  - freshness(crime_date) < 10d:
+      name: Les dernières données dates de moins de 10 jours
+
+  - max(crime_date) <= now():
+      name: Aucune date transformée,  la date la plus récente n’est pas dans le futur
