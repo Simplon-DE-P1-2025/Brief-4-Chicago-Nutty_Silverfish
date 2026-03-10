@@ -1,0 +1,38 @@
+# Controles qualite sur les donnees transformees dans la table sandbox
+checks for chicago_crimes_transformed_v2:
+  - row_count >= 1500:
+      name: La table sandbox contient suffisamment de donnees
+
+  - missing_count(id) = 0:
+      name: Aucun ID manquant
+
+  - duplicate_count(id) = 0:
+      name: Les IDs sont uniques
+
+  - missing_count(crime_date) = 0:
+      name: Aucune date manquante
+
+  - missing_count(latitude) = 0:
+      name: Aucune latitude manquante
+
+  - missing_count(longitude) = 0:
+      name: Aucune longitude manquante
+
+  - min(latitude) >= 41.6:
+      name: Latitude minimale dans les limites de Chicago
+
+  - max(latitude) <= 42.1:
+      name: Latitude maximale dans les limites de Chicago
+
+  - min(longitude) >= -87.95:
+      name: Longitude minimale dans les limites de Chicago
+
+  - max(longitude) <= -87.5:
+      name: Longitude maximale dans les limites de Chicago
+
+  - failed rows:
+      name: Aucune date dans le futur
+      fail query: |
+        SELECT id, crime_date
+        FROM chicago_crimes_transformed_v2
+        WHERE crime_date > NOW()

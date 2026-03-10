@@ -329,3 +329,89 @@ def transform_and_load(
         )
     logger.info("%s lignes transformees chargees dans %s", len(transformed_df), transformed_staging_table)
     return len(transformed_df)
+
+
+# --- Sandbox : transformation SQL pure (pas de pandas) ---
+
+SANDBOX_TABLE = "chicago_crimes_transformed_v2"
+
+
+def create_sandbox_table(hook: PostgresHook, table_name: str = SANDBOX_TABLE) -> None:
+    """Cree la table sandbox si elle n'existe pas."""
+    create_table_if_missing(hook, table_name, TRANSFORMED_TABLE_SCHEMA)
+
+
+def transform_raw_to_table_sql(
+    hook: PostgresHook,
+    source_table: str = RAW_TABLE,
+    target_table: str = SANDBOX_TABLE,
+    geo_filter: bool = True,
+    future_date_filter: bool = True,
+    truncate_target: bool = True,
+) -> int:
+    """Transforme les donnees brutes vers une table cible entierement en SQL.
+
+    Contrairement a transform_and_load qui utilise pandas, cette fonction
+    effectue toute la transformation cote PostgreSQL. Elle gere des millions
+    de lignes sans consommation memoire Python.
+    """
+    cols = ", ".join(TRANSFORMED_COLUMNS)
+
+    where_clauses = [
+        "latitude IS NOT NULL",
+        "longitude IS NOT NULL",
+        "primary_type IS NOT NULL",
+        "date IS NOT NULL",
+        "LOWER(TRIM(COALESCE(arrest, ''))) IN ('true', 'false')",
+        "LOWER(TRIM(COALESCE(domestic, ''))) IN ('true', 'false')",
+    ]
+
+    if geo_filter:
+        where_clauses.append("latitude::DOUBLE PRECISION BETWEEN 41.6 AND 42.1")
+        where_clauses.append("longitude::DOUBLE PRECISION BETWEEN -87.95 AND -87.5")
+
+    if future_date_filter:
+        where_clauses.append("date::TIMESTAMP <= NOW()")
+
+    where_sql = " AND ".join(where_clauses)
+
+    updates = ", ".join(
+        f"{c} = EXCLUDED.{c}" for c in TRANSFORMED_COLUMNS if c != "id"
+    )
+
+    sql = f"""
+        INSERT INTO {target_table} ({cols})
+        SELECT
+            id,
+            case_number,
+            date::TIMESTAMP AS crime_date,
+            EXTRACT(YEAR FROM date::TIMESTAMP)::INTEGER AS crime_year,
+            EXTRACT(MONTH FROM date::TIMESTAMP)::INTEGER AS crime_month,
+            EXTRACT(DOW FROM date::TIMESTAMP)::INTEGER AS crime_day_of_week,
+            block,
+            primary_type,
+            description,
+            location_description,
+            CASE LOWER(TRIM(arrest)) WHEN 'true' THEN TRUE WHEN 'false' THEN FALSE END AS arrest,
+            CASE LOWER(TRIM(domestic)) WHEN 'true' THEN TRUE WHEN 'false' THEN FALSE END AS domestic,
+            district,
+            ward,
+            community_area,
+            latitude::DOUBLE PRECISION,
+            longitude::DOUBLE PRECISION
+        FROM {source_table}
+        WHERE {where_sql}
+        ON CONFLICT (id) DO UPDATE SET {updates};
+    """
+
+    if truncate_target:
+        hook.run(f"TRUNCATE TABLE {target_table};")
+
+    hook.run(sql)
+
+    count = hook.get_first(f"SELECT COUNT(*) FROM {target_table}")[0]
+    logger.info(
+        "Transformation SQL terminee: %s lignes dans %s depuis %s",
+        count, target_table, source_table,
+    )
+    return count
