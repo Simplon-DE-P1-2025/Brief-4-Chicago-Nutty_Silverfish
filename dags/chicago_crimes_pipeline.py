@@ -269,8 +269,15 @@ def chicago_crimes_pipeline():
 
                         # Promouvoir vers production
                         logger.info("Promotion vers production")
-                        hook.run(f"INSERT INTO {RAW_TABLE} SELECT * FROM {RAW_STAGING}")
-                        hook.run(f"INSERT INTO {TRANSFORMED_TABLE} SELECT * FROM {TRANSFORMED_STAGING}")
+                        # use ON CONFLICT DO NOTHING to avoid failing on duplicate primary keys
+                        hook.run(
+                            f"INSERT INTO {RAW_TABLE} SELECT * FROM {RAW_STAGING} "
+                            "ON CONFLICT (id) DO NOTHING"
+                        )
+                        hook.run(
+                            f"INSERT INTO {TRANSFORMED_TABLE} SELECT * FROM {TRANSFORMED_STAGING} "
+                            "ON CONFLICT (id) DO NOTHING"
+                        )
                         logger.info("Page %d: %d lignes transformees et promotees", pages_processed, transformed_rows)
                     else:
                         logger.warning("Page %d: aucune donnee exploitable apres transformation", pages_processed)
