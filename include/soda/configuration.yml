@@ -1,9 +1,9 @@
-data_source analytics_warehouse:
+data_source chicago_crimes:
   type: postgres
   connection:
-    host: localhost
-    port: 5433
-    username: postgres
-    password: root
-    database: db_chicago_nutty_silverfish
+    host: ${POSTGRES_HOST}
+    port: ${POSTGRES_PORT}
+    username: ${POSTGRES_USER}
+    password: ${POSTGRES_PASSWORD}
+    database: ${POSTGRES_DB}
     schema: public

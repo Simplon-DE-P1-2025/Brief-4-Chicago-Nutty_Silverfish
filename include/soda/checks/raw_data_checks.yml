@@ -1,0 +1,16 @@
+# Controles qualite sur les donnees brutes en staging
+checks for chicago_crimes_raw_staging:
+  - row_count > 0:
+      name: La table brute contient des donnees
+
+  - missing_count(id) = 0:
+      name: Aucun ID manquant
+
+  - missing_count(date) = 0:
+      name: Aucune date manquante
+
+  - missing_count(primary_type) = 0:
+      name: Aucun type de crime manquant
+
+  - duplicate_count(id) = 0:
+      name: Les IDs sont uniques

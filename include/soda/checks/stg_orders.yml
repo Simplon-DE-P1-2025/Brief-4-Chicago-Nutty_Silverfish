@@ -1,3 +1,0 @@
-checks for stg_orders:
-  - row_count > 0
-  - missing_count(order_id) = 0

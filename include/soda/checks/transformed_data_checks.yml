@@ -1,0 +1,16 @@
+# Controles qualite sur les donnees transformees en staging
+checks for chicago_crimes_transformed_staging:
+  - row_count > 0:
+      name: La table transformee contient des donnees
+
+  - missing_count(id) = 0:
+      name: Aucun ID manquant apres transformation
+
+  - missing_count(crime_date) = 0:
+      name: Aucune date manquante apres transformation
+
+  - missing_count(latitude) = 0:
+      name: Aucune latitude manquante
+
+  - duplicate_count(id) = 0:
+      name: Les IDs restent uniques apres transformation
