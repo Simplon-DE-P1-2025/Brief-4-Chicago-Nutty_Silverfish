@@ -1,4 +1,4 @@
-"""Premier socle du pipeline Chicago Crimes."""
+"""Pipeline Chicago Crimes avec ingestion, transformation et checks Soda."""
 
 from __future__ import annotations
 
@@ -7,20 +7,27 @@ import logging
 import os
 import sys
 
-from airflow.decorators import dag, task
+from airflow.sdk import dag, task
+from airflow.sdk.bases.hook import BaseHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 import pandas as pd
 import requests
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from pipeline_utils import normalize_boolean_field, staging_table_name
+from pipeline_utils import (
+    build_soda_environment,
+    normalize_boolean_field,
+    staging_table_name,
+)
 
 logger = logging.getLogger(__name__)
 
 CHICAGO_API_URL = "https://data.cityofchicago.org/resource/ijzp-q8t2.json"
 API_LIMIT = 2000
 POSTGRES_CONN_ID = "chicago_crimes_db"
+SODA_CONFIG_PATH = "/usr/local/airflow/include/soda/configuration.yml"
+SODA_CHECKS_DIR = "/usr/local/airflow/include/soda/checks"
 RAW_TABLE = "chicago_crimes_raw"
 TRANSFORMED_TABLE = "chicago_crimes_transformed"
 RAW_STAGING = staging_table_name(RAW_TABLE)
@@ -38,13 +45,34 @@ def fetch_crimes_data(limit: int) -> list[dict]:
     return response.json()
 
 
+def run_soda_scan(check_file: str, scan_name: str):
+    """Execute un scan Soda sur la base cible."""
+    from soda.scan import Scan
+
+    connection = BaseHook.get_connection(POSTGRES_CONN_ID)
+    os.environ.update(build_soda_environment(connection))
+
+    scan = Scan()
+    scan.set_scan_definition_name(scan_name)
+    scan.set_data_source_name("chicago_crimes")
+    scan.add_configuration_yaml_file(SODA_CONFIG_PATH)
+    scan.add_sodacl_yaml_file(os.path.join(SODA_CHECKS_DIR, check_file))
+    scan.execute()
+
+    results = scan.get_scan_results()
+    logger.info("Soda scan %s termine: %s", scan_name, results)
+    if scan.has_check_fails():
+        raise ValueError(f"Soda scan {scan_name} echoue: {scan.get_checks_fail()}")
+    return results
+
+
 @dag(
     dag_id="chicago_crimes_pipeline",
-    description="Pipeline Chicago Crimes - etape 2",
+    description="Pipeline Chicago Crimes - etape 3",
     schedule="@daily",
     start_date=datetime(2025, 1, 1),
     catchup=False,
-    tags=["dataops", "chicago"],
+    tags=["dataops", "chicago", "soda"],
     default_args={"owner": "dataops-team", "retries": 2},
 )
 def chicago_crimes_pipeline():
@@ -179,6 +207,12 @@ def chicago_crimes_pipeline():
         return len(df)
 
     @task()
+    def soda_check_raw(row_count: int):
+        """Controle qualite sur la table brute de staging."""
+        logger.info("Controle Soda sur %s lignes brutes", row_count)
+        return run_soda_scan("raw_data_checks.yml", "raw_quality_check")
+
+    @task()
     def transform_data():
         """Transforme les donnees brutes et charge la table transformee en staging."""
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
@@ -239,11 +273,19 @@ def chicago_crimes_pipeline():
         logger.info("%s lignes transformees chargees dans %s", len(transformed_df), TRANSFORMED_STAGING)
         return len(transformed_df)
 
+    @task()
+    def soda_check_transformed(transformed_count: int):
+        """Controle qualite sur la table transformee de staging."""
+        logger.info("Controle Soda sur %s lignes transformees", transformed_count)
+        return run_soda_scan("transformed_data_checks.yml", "transformed_quality_check")
+
     tables = create_tables()
     rows = ingest_data()
+    raw_ok = soda_check_raw(rows)
     transformed = transform_data()
+    transformed_ok = soda_check_transformed(transformed)
 
-    tables >> rows >> transformed
+    tables >> rows >> raw_ok >> transformed >> transformed_ok
 
 
 chicago_crimes_pipeline()
