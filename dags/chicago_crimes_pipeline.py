@@ -34,12 +34,17 @@ RAW_STAGING = staging_table_name(RAW_TABLE)
 TRANSFORMED_STAGING = staging_table_name(TRANSFORMED_TABLE)
 
 
-def fetch_crimes_data(limit: int) -> list[dict]:
-    """Recupere les derniers crimes depuis l'API Chicago."""
+def fetch_crimes_data(limit: int, offset: int, since_date: str | None) -> list[dict]:
+    """Recupere les derniers crimes depuis l'API Chicago avec pagination."""
     params = {
         "$limit": limit,
+        "$offset": offset,
         "$order": "date DESC",
     }
+    
+    if since_date:
+        params["$where"] = f"date > '{since_date}'"
+    
     response = requests.get(CHICAGO_API_URL, params=params, timeout=120)
     response.raise_for_status()
     return response.json()
@@ -136,16 +141,14 @@ def chicago_crimes_pipeline():
 
         hook.run(
             f"""
-            DROP TABLE IF EXISTS {RAW_STAGING};
-            CREATE TABLE {RAW_STAGING}
+            CREATE TABLE IF NOT EXISTS {RAW_STAGING}
             (LIKE {RAW_TABLE} INCLUDING DEFAULTS INCLUDING CONSTRAINTS);
             """
         )
 
         hook.run(
             f"""
-            DROP TABLE IF EXISTS {TRANSFORMED_STAGING};
-            CREATE TABLE {TRANSFORMED_STAGING}
+            CREATE TABLE IF NOT EXISTS {TRANSFORMED_STAGING}
             (LIKE {TRANSFORMED_TABLE} INCLUDING DEFAULTS INCLUDING CONSTRAINTS);
             """
         )
@@ -159,149 +162,150 @@ def chicago_crimes_pipeline():
         )
 
     @task()
-    def ingest_data():
-        """Recupere l'API et charge la table brute en staging."""
-        data = fetch_crimes_data(API_LIMIT)
-        if not data:
-            raise ValueError("Aucune donnee recuperee depuis l'API Chicago")
-
-        df = pd.DataFrame(data)
-        columns = [
-            "id",
-            "case_number",
-            "date",
-            "block",
-            "iucr",
-            "primary_type",
-            "description",
-            "location_description",
-            "arrest",
-            "domestic",
-            "beat",
-            "district",
-            "ward",
-            "community_area",
-            "fbi_code",
-            "x_coordinate",
-            "y_coordinate",
-            "year",
-            "updated_on",
-            "latitude",
-            "longitude",
-        ]
-        df = df[[col for col in columns if col in df.columns]]
-
+    def process_all_pages():
+        """Traite toutes les pages de donnees de maniere sequentielle."""
+        logger.info("Debut du traitement de toutes les pages")
         hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
         engine = hook.get_sqlalchemy_engine()
-        hook.run(f"TRUNCATE TABLE {RAW_STAGING};")
-        df.to_sql(
-            RAW_STAGING,
-            engine,
-            if_exists="append",
-            index=False,
-            method="multi",
-            chunksize=1000,
-        )
+        logger.info("Connexion a la base de donnees etablie")
 
-        logger.info("%s lignes inserees dans %s", len(df), RAW_STAGING)
-        return len(df)
+        # Recuperer la date la plus recente dans la table brute
+        try:
+            logger.info("Recuperation de la date max depuis %s", RAW_TABLE)
+            result = hook.get_records(f"SELECT MAX(date) FROM {RAW_TABLE}")
+            since_date = result[0][0] if result and result[0][0] else "2025-01-01T00:00:00.000"
+            logger.info("Date max recuperee: %s", since_date)
+        except Exception as e:
+            logger.warning("Erreur lors de la recuperation de la date max: %s. Utilisation de la date par defaut.", e)
+            since_date = "2025-01-01T00:00:00.000"
+        
+        logger.info("Recuperation des donnees depuis %s", since_date)
+
+        # Fetch juste la premiere page pour verifier s'il y a des donnees
+        try:
+            logger.info("Test de l'API avec la premiere page")
+            data = fetch_crimes_data(API_LIMIT, 0, since_date)
+            logger.info("API repondue avec %d enregistrements", len(data) if data else 0)
+            if not data:
+                logger.info("Aucune donnee nouvelle a recuperer")
+                return {"total_ingested": 0, "total_transformed": 0, "pages_processed": 0}
+        except Exception as e:
+            logger.error("Erreur lors de l'appel API: %s", e)
+            raise
+
+        # Determiner le nombre de pages
+        if len(data) < API_LIMIT:
+            offsets = [0]
+            logger.info("Une seule page detectee")
+        else:
+            offsets = [i * API_LIMIT for i in range(100)]  # Max 100 pages
+            logger.info("Generation de %d offsets potentiels", len(offsets))
+
+        total_ingested = 0
+        total_transformed = 0
+        pages_processed = 0
+
+        # Traiter chaque page sequentiellement
+        for offset in offsets:
+            logger.info("Traitement de la page offset=%d", offset)
+            
+            try:
+                data = fetch_crimes_data(API_LIMIT, offset, since_date)
+                if not data:
+                    logger.info("Aucune donnee pour l'offset %d - pagination terminee", offset)
+                    break
+
+                logger.info("Page %d: %d enregistrements recuperes", offset // API_LIMIT, len(data))
+                
+                df = pd.DataFrame(data)
+                columns = [
+                    "id", "case_number", "date", "block", "iucr", "primary_type",
+                    "description", "location_description", "arrest", "domestic",
+                    "beat", "district", "ward", "community_area", "fbi_code",
+                    "x_coordinate", "y_coordinate", "year", "updated_on",
+                    "latitude", "longitude",
+                ]
+                df = df[[col for col in columns if col in df.columns]]
+
+                # Inserer dans staging
+                logger.info("Insertion dans staging: %d lignes", len(df))
+                hook.run(f"TRUNCATE TABLE {RAW_STAGING}")
+                df.to_sql(RAW_STAGING, engine, if_exists="append", index=False, method="multi", chunksize=1000)
+                ingested_rows = len(df)
+                total_ingested += ingested_rows
+                logger.info("Page %d: %d lignes inserees dans %s", pages_processed, ingested_rows, RAW_STAGING)
+
+                # Transformer
+                logger.info("Transformation des donnees")
+                df = pd.read_sql(f"SELECT * FROM {RAW_STAGING}", engine)
+                if not df.empty:
+                    df = df.dropna(subset=["latitude", "longitude", "primary_type"])
+                    df["crime_date"] = pd.to_datetime(df["date"], format="mixed", errors="coerce")
+                    df = df.dropna(subset=["crime_date"])
+                    df["crime_year"] = df["crime_date"].dt.year
+                    df["crime_month"] = df["crime_date"].dt.month
+                    df["crime_day_of_week"] = df["crime_date"].dt.dayofweek
+
+                    for field in ["arrest", "domestic"]:
+                        df[field] = df[field].map(lambda value, f=field: normalize_boolean_field(value, f))
+
+                    df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+                    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
+                    df = df.dropna(subset=["latitude", "longitude"])
+
+                    transformed_df = df[[
+                        "id", "case_number", "crime_date", "crime_year", "crime_month",
+                        "crime_day_of_week", "block", "primary_type", "description",
+                        "location_description", "arrest", "domestic", "district",
+                        "ward", "community_area", "latitude", "longitude",
+                    ]].copy()
+
+                    if not transformed_df.empty:
+                        logger.info("Insertion des donnees transformees: %d lignes", len(transformed_df))
+                        hook.run(f"TRUNCATE TABLE {TRANSFORMED_STAGING}")
+                        transformed_df.to_sql(TRANSFORMED_STAGING, engine, if_exists="append", index=False, method="multi", chunksize=1000)
+                        transformed_rows = len(transformed_df)
+                        total_transformed += transformed_rows
+
+                        # Promouvoir vers production
+                        logger.info("Promotion vers production")
+                        # use ON CONFLICT DO NOTHING to avoid failing on duplicate primary keys
+                        hook.run(
+                            f"INSERT INTO {RAW_TABLE} SELECT * FROM {RAW_STAGING} "
+                            "ON CONFLICT (id) DO NOTHING"
+                        )
+                        hook.run(
+                            f"INSERT INTO {TRANSFORMED_TABLE} SELECT * FROM {TRANSFORMED_STAGING} "
+                            "ON CONFLICT (id) DO NOTHING"
+                        )
+                        logger.info("Page %d: %d lignes transformees et promotees", pages_processed, transformed_rows)
+                    else:
+                        logger.warning("Page %d: aucune donnee exploitable apres transformation", pages_processed)
+                else:
+                    logger.warning("Page %d: aucune donnee dans staging", pages_processed)
+
+                pages_processed += 1
+                
+            except Exception as e:
+                logger.error("Erreur lors du traitement de la page offset=%d: %s", offset, e)
+                raise
+
+        logger.info("Traitement termine: %d pages, %d lignes ingerees, %d lignes transformees", 
+                   pages_processed, total_ingested, total_transformed)
+        return {"total_ingested": total_ingested, "total_transformed": total_transformed, "pages_processed": pages_processed}
 
     @task()
-    def soda_check_raw(row_count: int):
-        """Controle qualite sur la table brute de staging."""
-        logger.info("Controle Soda sur %s lignes brutes", row_count)
-        return run_soda_scan("raw_data_checks.yml", "raw_quality_check")
-
-    @task()
-    def transform_data():
-        """Transforme les donnees brutes et charge la table transformee en staging."""
-        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
-        engine = hook.get_sqlalchemy_engine()
-
-        df = pd.read_sql(f"SELECT * FROM {RAW_STAGING}", engine)
-        logger.info("Donnees brutes lues depuis %s: %s lignes", RAW_STAGING, len(df))
-        if df.empty:
-            raise ValueError("Aucune donnee brute disponible pour la transformation")
-
-        # 1) Filtrer les lignes sans infos minimales
-        df = df.dropna(subset=["latitude", "longitude", "primary_type", "date"])
-        # 2) Conversion de la date
-        df["crime_date"] = pd.to_datetime(df["date"], format="mixed", errors="coerce")
-        df = df.dropna(subset=["crime_date"])
-
-        # 3) Filtrer les dates aberrantes
-        now = pd.Timestamp.utcnow()
-        df = df[df["crime_date"] <= now]
-        # 4) Features temporelles de base
-        df["crime_year"] = df["crime_date"].dt.year
-        df["crime_month"] = df["crime_date"].dt.month
-        df["crime_day_of_week"] = df["crime_date"].dt.dayofweek
-
-        # 5) Normalisation des booléens
-        for field in ["arrest", "domestic"]:
-            df[field] = df[field].map(lambda value, f=field: normalize_boolean_field(value, f))
-
-        # 6) Conversion des coordonnées
-        df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
-        df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-        df = df.dropna(subset=["latitude", "longitude"])
-
-        # 7) Filtrer les coordonnées hors de la zone de Chicago
-        # (approx : lat 41.6–42.1, long -87.95 – -87.5)
-        df = df[
-            (df["latitude"].between(41.6, 42.1)) &
-            (df["longitude"].between(-87.95, -87.5))
-        ]
-        # 8) Sélection des colonnes finales
-        transformed_df = df[[
-            "id",
-            "case_number",
-            "crime_date",
-            "crime_year",
-            "crime_month",
-            "crime_day_of_week",
-            "block",
-            "primary_type",
-            "description",
-            "location_description",
-            "arrest",
-            "domestic",
-            "district",
-            "ward",
-            "community_area",
-            "latitude",
-            "longitude",
-        ]].copy()
-
-        if transformed_df.empty:
-            raise ValueError("Aucune donnee exploitable apres transformation")
-
-        hook.run(f"TRUNCATE TABLE {TRANSFORMED_STAGING};")
-        transformed_df.to_sql(
-            TRANSFORMED_STAGING,
-            engine,
-            if_exists="append",
-            index=False,
-            method="multi",
-            chunksize=1000,
-        )
-
-        logger.info("%s lignes transformees chargees dans %s", len(transformed_df), TRANSFORMED_STAGING)
-        return len(transformed_df)
-
-    @task()
-    def soda_check_transformed(transformed_count: int):
-        """Controle qualite sur la table transformee de staging."""
-        logger.info("Controle Soda sur %s lignes transformees", transformed_count)
-        return run_soda_scan("transformed_data_checks.yml", "transformed_quality_check")
+    def final_quality_check():
+        """Controle qualite final sur les tables production apres toutes les pages."""
+        logger.info("Controle Soda final sur les donnees production")
+        run_soda_scan("raw_data_checks.yml", "raw_quality_check_final")
+        run_soda_scan("transformed_data_checks.yml", "transformed_quality_check_final")
 
     tables = create_tables()
-    rows = ingest_data()
-    raw_ok = soda_check_raw(rows)
-    transformed = transform_data()
-    transformed_ok = soda_check_transformed(transformed)
+    process_all = process_all_pages()
+    final_checks = final_quality_check()
 
-    tables >> rows >> raw_ok >> transformed >> transformed_ok
+    tables >> process_all >> final_checks
 
 
 chicago_crimes_pipeline()
