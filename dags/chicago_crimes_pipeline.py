@@ -14,7 +14,7 @@ import requests
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from pipeline_utils import staging_table_name
+from pipeline_utils import normalize_boolean_field, staging_table_name
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ def fetch_crimes_data(limit: int) -> list[dict]:
 
 @dag(
     dag_id="chicago_crimes_pipeline",
-    description="Pipeline Chicago Crimes - etape 1",
+    description="Pipeline Chicago Crimes - etape 2",
     schedule="@daily",
     start_date=datetime(2025, 1, 1),
     catchup=False,
@@ -178,7 +178,72 @@ def chicago_crimes_pipeline():
         logger.info("%s lignes inserees dans %s", len(df), RAW_STAGING)
         return len(df)
 
-    create_tables() >> ingest_data()
+    @task()
+    def transform_data():
+        """Transforme les donnees brutes et charge la table transformee en staging."""
+        hook = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+        engine = hook.get_sqlalchemy_engine()
+
+        df = pd.read_sql(f"SELECT * FROM {RAW_STAGING}", engine)
+        logger.info("Donnees brutes lues depuis %s: %s lignes", RAW_STAGING, len(df))
+        if df.empty:
+            raise ValueError("Aucune donnee brute disponible pour la transformation")
+
+        df = df.dropna(subset=["latitude", "longitude", "primary_type"])
+        df["crime_date"] = pd.to_datetime(df["date"], format="mixed", errors="coerce")
+        df = df.dropna(subset=["crime_date"])
+        df["crime_year"] = df["crime_date"].dt.year
+        df["crime_month"] = df["crime_date"].dt.month
+        df["crime_day_of_week"] = df["crime_date"].dt.dayofweek
+
+        for field in ["arrest", "domestic"]:
+            df[field] = df[field].map(lambda value, f=field: normalize_boolean_field(value, f))
+
+        df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+        df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
+        df = df.dropna(subset=["latitude", "longitude"])
+
+        transformed_df = df[[
+            "id",
+            "case_number",
+            "crime_date",
+            "crime_year",
+            "crime_month",
+            "crime_day_of_week",
+            "block",
+            "primary_type",
+            "description",
+            "location_description",
+            "arrest",
+            "domestic",
+            "district",
+            "ward",
+            "community_area",
+            "latitude",
+            "longitude",
+        ]].copy()
+
+        if transformed_df.empty:
+            raise ValueError("Aucune donnee exploitable apres transformation")
+
+        hook.run(f"TRUNCATE TABLE {TRANSFORMED_STAGING};")
+        transformed_df.to_sql(
+            TRANSFORMED_STAGING,
+            engine,
+            if_exists="append",
+            index=False,
+            method="multi",
+            chunksize=1000,
+        )
+
+        logger.info("%s lignes transformees chargees dans %s", len(transformed_df), TRANSFORMED_STAGING)
+        return len(transformed_df)
+
+    tables = create_tables()
+    rows = ingest_data()
+    transformed = transform_data()
+
+    tables >> rows >> transformed
 
 
 chicago_crimes_pipeline()
