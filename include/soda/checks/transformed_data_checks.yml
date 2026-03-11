@@ -12,6 +12,9 @@ checks for chicago_crimes_transformed_staging:
   - missing_count(latitude) = 0:
       name: Aucune latitude manquante
 
+  - missing_count(longitude) = 0:
+      name: Aucune longitude manquante
+
   - duplicate_count(id) = 0:
       name: Les IDs restent uniques apres transformation
 
