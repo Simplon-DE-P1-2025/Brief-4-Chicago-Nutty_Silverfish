@@ -96,11 +96,10 @@ def chicago_crimes_daily():
         return transform_and_load(hook, engine)
 
     @task()
-    def final_quality_check():
-        """Controle qualite final sur les tables production apres toutes les pages."""
-        logger.info("Controle Soda final sur les donnees production")
-        run_soda_scan("raw_data_checks.yml", "raw_quality_check_final")
-        run_soda_scan("transformed_data_checks.yml", "transformed_quality_check_final")
+    def soda_check_transformed(transformed_count: int):
+        """Controle qualite sur la table transformee de staging."""
+        logger.info("Controle Soda sur %s lignes transformees", transformed_count)
+        return run_soda_scan("transformed_data_checks.yml", "transformed_quality_check")
 
     @task()
     def upsert_production():
