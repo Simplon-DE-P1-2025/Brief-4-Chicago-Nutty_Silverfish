@@ -1,3 +1,5 @@
+# Les placeholders ${POSTGRES_*} sont remplis a l'execution par
+# `run_soda_scan()` a partir de la connexion Airflow `chicago_crimes_db`.
 data_source chicago_crimes:
   type: postgres
   connection:

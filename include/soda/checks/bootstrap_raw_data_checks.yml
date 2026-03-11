@@ -1,0 +1,16 @@
+# Controles qualite sur les donnees brutes du bootstrap
+checks for chicago_crimes_raw_bootstrap_staging:
+  - row_count > 0:
+      name: La table brute bootstrap contient des donnees
+
+  - missing_count(id) = 0:
+      name: Aucun ID manquant
+
+  - missing_count(date) = 0:
+      name: Aucune date manquante
+
+  - missing_count(primary_type) = 0:
+      name: Aucun type de crime manquant
+
+  - duplicate_count(id) = 0:
+      name: Les IDs bootstrap sont uniques
